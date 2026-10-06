@@ -33,12 +33,15 @@ export type Gs25Product = {
 };
 
 export class Gs25ApiError extends Error {
+  readonly status: number;
+
   constructor(
     message: string,
-    readonly status: number,
+    status: number,
   ) {
     super(message);
     this.name = "Gs25ApiError";
+    this.status = status;
   }
 }
 

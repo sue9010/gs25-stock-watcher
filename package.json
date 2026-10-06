@@ -11,7 +11,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint .",
-    "test": "node --experimental-strip-types --test src/lib/inventory/transition.test.ts",
+    "test": "node --experimental-strip-types --test src/lib/inventory/transition.test.ts src/lib/gs25/products.test.ts src/lib/notifications/telegram.test.ts",
     "typecheck": "tsc --noEmit",
     "check": "npm run lint && npm run typecheck && npm run build"
   },
