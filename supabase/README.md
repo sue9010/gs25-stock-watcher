@@ -22,4 +22,6 @@ npx supabase db push
 
 ## Production secrets and Cron
 
-PowerShell에서 `scripts/configure_supabase_secrets.ps1`을 실행하면 Telegram token을 화면이나 파일에 남기지 않고 Edge Function Secret에 설정하며, Cron 인증용 난수를 Edge Secret과 Vault에 함께 저장한다. 이후 SQL Editor에서 `supabase/cron/setup.sql`을 한 번 실행한다. Cron은 매분 함수를 호출하고 각 사용자의 `check_interval_minutes`와 `next_check_at`이 실제 실행 주기를 결정한다.
+`scripts/configure_supabase_cron.ps1`은 Cron 인증용 난수를 Edge Secret과 Vault에 저장하고 `gs25-stock-check` 작업까지 설정한다. Cron은 매분 함수를 호출하고 각 사용자의 `check_interval_minutes`와 `next_check_at`이 실제 실행 주기를 결정한다.
+
+Telegram bot을 만든 뒤 PowerShell에서 `scripts/configure_supabase_secrets.ps1`을 실행하면 token을 화면이나 파일에 남기지 않고 Edge Function Secret에 설정한다.

@@ -2,7 +2,7 @@
 
 GS25 상품 재고를 주기적으로 확인하고 `0 → 양수` 입고 전환에서 Telegram 알림을 보내는 개인용 웹 애플리케이션이다. 관리 UI는 Vercel, 데이터·인증·상시 작업은 Supabase에 배치해 로컬 PC가 꺼져 있어도 동작하도록 설계한다.
 
-현재 상태: **Phase 4 — GS25 상품 검색 HTTP API 연결 및 검증 중**
+현재 상태: **Phase 12 — production 배포 및 Telegram credential 연결 단계**
 
 ## Stack
 
@@ -25,7 +25,7 @@ Copy-Item .env.example .env.local
 npm run dev
 ```
 
-`http://localhost:3000`에서 확인한다. 현재 Phase 1 화면은 연결 전 골격이며 실제 재고나 Supabase 연결을 가장하지 않는다.
+`http://localhost:3000`에서 확인한다.
 
 검사 명령:
 
@@ -59,7 +59,7 @@ npm audit --omit=dev
 - Cron과 수동 조회 모두 실행 이력을 남기고 동시 중복 실행을 차단한다.
 - Telegram은 provider interface 뒤에 두어 Slack adapter를 추가할 수 있게 한다.
 
-## Planned source layout
+## Source layout
 
 ```text
 src/
@@ -92,8 +92,30 @@ docs/
 11. Dashboard, History, Settings
 12. Vercel 배포와 production smoke test
 
-각 Phase는 구현 내용, 변경 파일, 테스트와 결과, 사용자 작업, 다음 Phase를 별도로 보고한 뒤 진행한다. 외부 API나 production 연결은 실제 확인 없이 완료로 표시하지 않는다.
+외부 API나 production 연결은 실제 확인 없이 완료로 표시하지 않는다.
 
-## Next phase prerequisites
+## Production operations
 
-Phase 3에서는 Supabase 원격 개발 프로젝트를 연결해 migration을 실제 적용·검증하고, Next.js의 인증 및 사용자별 서버 클라이언트를 구현한다. 로컬 Supabase용 Docker는 사용하지 않는다.
+Supabase Cron과 Edge Function 설정:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/configure_supabase_cron.ps1
+npx supabase functions deploy check-stock send-test-notification --project-ref zbopnlzsqlmxlrknyugu --no-verify-jwt --use-api
+```
+
+Telegram bot token 설정은 token을 파일이나 DB 테이블에 저장하지 않는 대화형 스크립트를 사용한다.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/configure_supabase_secrets.ps1
+```
+
+그 다음 웹 UI의 Notifications에서 bot과 대화한 `chat_id`를 추가하고 `Test`를 실행한다.
+
+Vercel production 환경변수 동기화 및 배포:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/sync_vercel_env.ps1
+vercel --prod --yes
+```
+
+로컬 Supabase용 Docker는 사용하지 않는다.

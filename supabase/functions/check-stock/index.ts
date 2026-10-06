@@ -1,17 +1,282 @@
-// @ts-nocheck
-import {createClient} from "npm:@supabase/supabase-js@2.117.2";import {detectStockTransition} from "../_shared/transition.ts";import {TelegramProvider,restockMessage} from "../_shared/telegram.ts";
-const cors={"access-control-allow-origin":"*","access-control-allow-headers":"authorization, x-client-info, apikey, content-type, x-cron-secret"};
-const json=(body:unknown,status=200)=>new Response(JSON.stringify(body),{status,headers:{...cors,"content-type":"application/json"}});
-function distance(a:any,b:any){const r=6371000,dLat=(b.latitude-a.latitude)*Math.PI/180,dLon=(b.longitude-a.longitude)*Math.PI/180,x=Math.sin(dLat/2)**2+Math.cos(a.latitude*Math.PI/180)*Math.cos(b.latitude*Math.PI/180)*Math.sin(dLon/2)**2;return 2*r*Math.asin(Math.sqrt(x))}
-function clusters(stores:any[]){const out:any[][]=[];for(const store of stores){const found=out.find(c=>distance(c[0],store)<=800);if(found)found.push(store);else out.push([store]);}return out;}
-async function inventory(itemCode:string,lat:number,lng:number){const url=new URL("/api/gs25/inventory",Deno.env.get("DAISO_API_BASE_URL")??"https://mcp.aka.page");url.searchParams.set("itemCode",itemCode);url.searchParams.set("lat",String(lat));url.searchParams.set("lng",String(lng));url.searchParams.set("storeLimit","50");let last;for(let i=0;i<3;i++){try{const r=await fetch(url,{signal:AbortSignal.timeout(10000)});if(!r.ok){if((r.status===429||r.status>=500)&&i<2){await new Promise(x=>setTimeout(x,300*2**i));continue;}throw new Error(`GS25 ${r.status}`)}const j=await r.json();if(j?.success!==true||!Array.isArray(j?.data?.inventory?.stores))throw new Error("Invalid GS25 response");return j.data.inventory.stores;}catch(e){last=e;if(i<2)await new Promise(x=>setTimeout(x,300*2**i));}}throw last;}
-async function runOwner(db:any,ownerId:string,source:"cron"|"manual"){
- const {data:settings}=await db.from("app_settings").select("*").eq("owner_id",ownerId).single();if(!settings?.monitoring_enabled&&source==="cron")return{skipped:true};
- const {data:run,error:runError}=await db.from("check_runs").insert({owner_id:ownerId,source,status:"running"}).select("id").single();if(runError)throw runError;
- try{const {data:targets,error}=await db.from("watch_targets").select("product_id,store_id,products!inner(id,item_code,item_name,enabled,archived_at),stores!inner(id,store_code,store_name,address,latitude,longitude,enabled,archived_at)").eq("owner_id",ownerId).eq("enabled",true).is("archived_at",null).eq("products.enabled",true).is("products.archived_at",null).eq("stores.enabled",true).is("stores.archived_at",null);if(error)throw error;
- const byProduct=new Map();for(const t of targets??[]){const p=t.products,s=t.stores;if(!byProduct.has(p.id))byProduct.set(p.id,{product:p,stores:[]});byProduct.get(p.id).stores.push(s)}let requestCount=0;for(const x of byProduct.values())requestCount+=clusters(x.stores).length;if(requestCount>(settings?.max_requests_per_run??12))throw new Error(`요청 수 ${requestCount}회가 실행 한도보다 큽니다.`);
- const {data:statuses}=await db.from("stock_status").select("product_id,store_id,quantity").eq("owner_id",ownerId);const previous=new Map((statuses??[]).map((s:any)=>[`${s.product_id}:${s.store_id}`,s.quantity]));const {data:destinations}=await db.from("notification_targets").select("id,type,target_identifier").eq("owner_id",ownerId).eq("enabled",true).is("archived_at",null);let checked=0;
- for(const {product,stores} of byProduct.values())for(const group of clusters(stores)){const rows=await inventory(product.item_code,group[0].latitude,group[0].longitude);const rowMap=new Map(rows.map((r:any)=>[r.storeCode,r]));for(const store of group){const row:any=rowMap.get(store.store_code);if(!row)continue;checked++;const now=new Date().toISOString(),current=row.realStockQuantity,key=`${product.id}:${store.id}`,before=previous.has(key)?previous.get(key):null,transition=detectStockTransition(before,current,settings?.initial_notification_enabled??false);await db.from("stock_status").upsert({owner_id:ownerId,product_id:product.id,store_id:store.id,quantity:current,pickup_quantity:row.pickupStockQuantity,delivery_quantity:row.deliveryStockQuantity,is_sold_out:current===0,checked_at:now},{onConflict:"product_id,store_id"});if(transition){const {data:event}=await db.from("stock_events").insert({owner_id:ownerId,product_id:product.id,store_id:store.id,previous_quantity:before,current_quantity:current,event_type:transition.eventType}).select("id").single();if(transition.shouldNotify&&event){let sent=0;for(const d of destinations??[]){if(d.type!=="telegram")continue;try{const token=Deno.env.get("TELEGRAM_BOT_TOKEN");if(!token)throw new Error("TELEGRAM_BOT_TOKEN missing");await new TelegramProvider(token).send(restockMessage(product.item_name,store.store_name,current,store.address,now),d.target_identifier);await db.from("notification_deliveries").insert({owner_id:ownerId,stock_event_id:event.id,notification_target_id:d.id,status:"sent",attempt_count:1,sent_at:now});sent++;}catch(e){await db.from("notification_deliveries").insert({owner_id:ownerId,stock_event_id:event.id,notification_target_id:d.id,status:"failed",attempt_count:1,last_error:String(e)});}}if(sent>0)await db.from("stock_events").update({notified:true,notified_at:now}).eq("id",event.id);}}previous.set(key,current);}}
- await db.from("app_settings").update({next_check_at:new Date(Date.now()+(settings?.check_interval_minutes??10)*60000).toISOString()}).eq("owner_id",ownerId);await db.from("check_runs").update({status:"succeeded",finished_at:new Date().toISOString(),products_checked:byProduct.size,stores_checked:checked,requests_made:requestCount}).eq("id",run.id);return{runId:run.id,products:byProduct.size,stores:checked,requests:requestCount};
- }catch(e){await db.from("check_runs").update({status:"failed",finished_at:new Date().toISOString(),error_message:String(e)}).eq("id",run.id);throw e;}}
-Deno.serve(async req=>{if(req.method==="OPTIONS")return new Response("ok",{headers:cors});if(req.method!=="POST")return json({error:"Method not allowed"},405);const url=Deno.env.get("SUPABASE_URL")!,service=Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,anon=Deno.env.get("SUPABASE_ANON_KEY")!,db=createClient(url,service,{auth:{persistSession:false}});try{const cron=req.headers.get("x-cron-secret"),expected=Deno.env.get("CRON_SECRET");let owners:string[]=[];if(cron&&expected&&cron===expected){const {data}=await db.from("app_settings").select("owner_id").eq("monitoring_enabled",true).lte("next_check_at",new Date().toISOString());owners=(data??[]).map((x:any)=>x.owner_id);}else{const token=req.headers.get("authorization")?.replace(/^Bearer\s+/i,"");if(!token)return json({error:"Unauthorized"},401);const auth=createClient(url,anon,{global:{headers:{Authorization:`Bearer ${token}`}},auth:{persistSession:false}});const {data,error}=await auth.auth.getUser(token);if(error||!data.user)return json({error:"Unauthorized"},401);owners=[data.user.id];}const results=[];for(const owner of owners)results.push(await runOwner(db,owner,cron?"cron":"manual"));return json({ok:true,results});}catch(e){return json({error:e instanceof Error?e.message:"Check failed"},500);}});
+import { createClient } from "npm:@supabase/supabase-js@2.117.2";
+import { z } from "npm:zod@4.6.5";
+
+import { detectStockTransition } from "../_shared/transition.ts";
+import { restockMessage, TelegramProvider } from "../_shared/telegram.ts";
+
+const corsHeaders = {
+  "access-control-allow-origin": "*",
+  "access-control-allow-headers": "authorization, x-client-info, apikey, content-type, x-cron-secret",
+};
+const inventoryResponseSchema = z.object({
+  success: z.literal(true),
+  data: z.object({ inventory: z.object({ stores: z.array(z.object({
+    storeCode: z.string().min(1),
+    storeName: z.string().min(1),
+    address: z.string().min(1),
+    latitude: z.number(),
+    longitude: z.number(),
+    realStockQuantity: z.number().int().nonnegative(),
+    pickupStockQuantity: z.number().int().nonnegative().nullable(),
+    deliveryStockQuantity: z.number().int().nonnegative().nullable(),
+    isSoldOut: z.boolean(),
+    distanceM: z.number().nonnegative(),
+  })) }) }),
+});
+
+type InventoryStore = z.infer<typeof inventoryResponseSchema>["data"]["inventory"]["stores"][number];
+type Product = { id: number; item_code: string; item_name: string };
+type Store = { id: number; store_code: string; store_name: string; address: string; latitude: number; longitude: number };
+
+function json(body: unknown, status = 200) {
+  return new Response(JSON.stringify(body), { status, headers: { ...corsHeaders, "content-type": "application/json" } });
+}
+
+function distanceM(a: Store, b: Store) {
+  const radiusM = 6_371_000;
+  const dLat = ((b.latitude - a.latitude) * Math.PI) / 180;
+  const dLng = ((b.longitude - a.longitude) * Math.PI) / 180;
+  const value = Math.sin(dLat / 2) ** 2 + Math.cos((a.latitude * Math.PI) / 180) * Math.cos((b.latitude * Math.PI) / 180) * Math.sin(dLng / 2) ** 2;
+  return 2 * radiusM * Math.asin(Math.sqrt(value));
+}
+
+function clusterStores(stores: Store[]) {
+  const clusters: Store[][] = [];
+  for (const store of stores) {
+    const cluster = clusters.find((candidate) => distanceM(candidate[0], store) <= 800);
+    if (cluster) cluster.push(store);
+    else clusters.push([store]);
+  }
+  return clusters;
+}
+
+async function fetchInventory(itemCode: string, latitude: number, longitude: number) {
+  const url = new URL("/api/gs25/inventory", Deno.env.get("DAISO_API_BASE_URL") ?? "https://mcp.aka.page");
+  url.searchParams.set("itemCode", itemCode);
+  url.searchParams.set("lat", String(latitude));
+  url.searchParams.set("lng", String(longitude));
+  url.searchParams.set("storeLimit", "50");
+
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const response = await fetch(url, { signal: AbortSignal.timeout(10_000) });
+      if (!response.ok) {
+        if (response.status === 429 || response.status >= 500) throw new Error(`Retryable GS25 inventory API ${response.status}`);
+        throw new Error(`GS25 inventory API ${response.status}`);
+      }
+      const parsed = inventoryResponseSchema.safeParse(await response.json());
+      if (!parsed.success) throw new Error("Invalid GS25 inventory response");
+      return parsed.data.data.inventory.stores;
+    } catch (error) {
+      lastError = error;
+      const message = error instanceof Error ? error.message : "";
+      const retryable = message.startsWith("Retryable ") || error instanceof TypeError || error instanceof DOMException;
+      if (!retryable || attempt === 2) break;
+      await new Promise((resolve) => setTimeout(resolve, 300 * 2 ** attempt));
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error("GS25 inventory request failed");
+}
+
+async function runOwner(db: ReturnType<typeof createClient>, ownerId: string, source: "cron" | "manual") {
+  const { data: settings, error: settingsError } = await db.from("app_settings").select("*").eq("owner_id", ownerId).single();
+  if (settingsError) throw settingsError;
+  if (!settings.monitoring_enabled && source === "cron") return { skipped: true };
+
+  await db.from("check_runs").update({
+    status: "failed",
+    finished_at: new Date().toISOString(),
+    error_message: "Stale running check expired before a new run.",
+  }).eq("owner_id", ownerId).eq("status", "running").lt("started_at", new Date(Date.now() - 5 * 60_000).toISOString());
+
+  const { data: run, error: runError } = await db.from("check_runs").insert({ owner_id: ownerId, source, status: "running" }).select("id").single();
+  if (runError?.code === "23505") return { skipped: true, reason: "already_running" };
+  if (runError) throw runError;
+
+  try {
+    const { data: targets, error: targetsError } = await db.from("watch_targets")
+      .select("product_id,store_id,products!inner(id,item_code,item_name,enabled,archived_at),stores!inner(id,store_code,store_name,address,latitude,longitude,enabled,archived_at)")
+      .eq("owner_id", ownerId).eq("enabled", true).is("archived_at", null)
+      .eq("products.enabled", true).is("products.archived_at", null)
+      .eq("stores.enabled", true).is("stores.archived_at", null);
+    if (targetsError) throw targetsError;
+
+    const byProduct = new Map<number, { product: Product; stores: Store[] }>();
+    for (const target of targets ?? []) {
+      const product = target.products as unknown as Product;
+      const store = target.stores as unknown as Store;
+      const existing = byProduct.get(product.id);
+      if (existing) existing.stores.push(store);
+      else byProduct.set(product.id, { product, stores: [store] });
+    }
+
+    let requestCount = 0;
+    for (const item of byProduct.values()) requestCount += clusterStores(item.stores).length;
+    if (requestCount > settings.max_requests_per_run) throw new Error(`요청 수 ${requestCount}회가 실행 한도보다 큽니다.`);
+
+    const { data: recentRuns, error: recentRunsError } = await db.from("check_runs").select("requests_made")
+      .eq("owner_id", ownerId).eq("status", "succeeded")
+      .gte("started_at", new Date(Date.now() - 24 * 60 * 60_000).toISOString());
+    if (recentRunsError) throw recentRunsError;
+    const recentRequests = (recentRuns ?? []).reduce((sum, recentRun) => sum + recentRun.requests_made, 0);
+    if (recentRequests + requestCount > settings.daily_api_request_budget) throw new Error("24시간 API 요청 예산을 초과합니다.");
+
+    const { data: statuses, error: statusesError } = await db.from("stock_status").select("product_id,store_id,quantity").eq("owner_id", ownerId);
+    if (statusesError) throw statusesError;
+    const previous = new Map((statuses ?? []).map((status) => [`${status.product_id}:${status.store_id}`, status.quantity]));
+
+    const { data: destinations, error: destinationsError } = await db.from("notification_targets")
+      .select("id,type,target_identifier").eq("owner_id", ownerId).eq("enabled", true).is("archived_at", null);
+    if (destinationsError) throw destinationsError;
+
+    let checkedStores = 0;
+    for (const { product, stores } of byProduct.values()) {
+      for (const cluster of clusterStores(stores)) {
+        const inventory = await fetchInventory(product.item_code, cluster[0].latitude, cluster[0].longitude);
+        const inventoryByStore = new Map<string, InventoryStore>(inventory.map((row) => [row.storeCode, row]));
+        for (const store of cluster) {
+          const row = inventoryByStore.get(store.store_code);
+          if (!row) continue;
+          checkedStores += 1;
+          const checkedAt = new Date().toISOString();
+          const currentQuantity = row.realStockQuantity;
+          const statusKey = `${product.id}:${store.id}`;
+          const previousQuantity = previous.has(statusKey) ? (previous.get(statusKey) ?? null) : null;
+          const transition = detectStockTransition(previousQuantity, currentQuantity, settings.initial_notification_enabled);
+
+          const { error: statusError } = await db.from("stock_status").upsert({
+            owner_id: ownerId,
+            product_id: product.id,
+            store_id: store.id,
+            quantity: currentQuantity,
+            pickup_quantity: row.pickupStockQuantity,
+            delivery_quantity: row.deliveryStockQuantity,
+            is_sold_out: currentQuantity === 0,
+            checked_at: checkedAt,
+          }, { onConflict: "product_id,store_id" });
+          if (statusError) throw statusError;
+
+          if (transition) {
+            const { data: event, error: eventError } = await db.from("stock_events").insert({
+              owner_id: ownerId,
+              product_id: product.id,
+              store_id: store.id,
+              previous_quantity: previousQuantity,
+              current_quantity: currentQuantity,
+              event_type: transition.eventType,
+            }).select("id").single();
+            if (eventError) throw eventError;
+
+            if (transition.shouldNotify) {
+              let sentCount = 0;
+              for (const destination of destinations ?? []) {
+                if (destination.type !== "telegram") continue;
+                try {
+                  const token = Deno.env.get("TELEGRAM_BOT_TOKEN");
+                  if (!token) throw new Error("TELEGRAM_BOT_TOKEN missing");
+                  await new TelegramProvider(token).send(
+                    restockMessage(product.item_name, store.store_name, currentQuantity, store.address, checkedAt),
+                    destination.target_identifier,
+                  );
+                  const { error: deliveryError } = await db.from("notification_deliveries").insert({
+                    owner_id: ownerId,
+                    stock_event_id: event.id,
+                    notification_target_id: destination.id,
+                    status: "sent",
+                    attempt_count: 1,
+                    sent_at: checkedAt,
+                  });
+                  if (deliveryError) throw deliveryError;
+                  sentCount += 1;
+                } catch (error) {
+                  await db.from("notification_deliveries").insert({
+                    owner_id: ownerId,
+                    stock_event_id: event.id,
+                    notification_target_id: destination.id,
+                    status: "failed",
+                    attempt_count: 1,
+                    last_error: error instanceof Error ? error.message : String(error),
+                  });
+                }
+              }
+              if (sentCount > 0) {
+                const { error: notifiedError } = await db.from("stock_events").update({ notified: true, notified_at: checkedAt }).eq("id", event.id);
+                if (notifiedError) throw notifiedError;
+              }
+            }
+          }
+          previous.set(statusKey, currentQuantity);
+        }
+      }
+    }
+
+    const finishedAt = new Date().toISOString();
+    await db.from("app_settings").update({
+      next_check_at: new Date(Date.now() + settings.check_interval_minutes * 60_000).toISOString(),
+    }).eq("owner_id", ownerId);
+    const { error: completionError } = await db.from("check_runs").update({
+      status: "succeeded",
+      finished_at: finishedAt,
+      products_checked: byProduct.size,
+      stores_checked: checkedStores,
+      requests_made: requestCount,
+    }).eq("id", run.id);
+    if (completionError) throw completionError;
+    return { runId: run.id, products: byProduct.size, stores: checkedStores, requests: requestCount };
+  } catch (error) {
+    await db.from("check_runs").update({
+      status: "failed",
+      finished_at: new Date().toISOString(),
+      error_message: error instanceof Error ? error.message : String(error),
+    }).eq("id", run.id);
+    throw error;
+  }
+}
+
+Deno.serve(async (request) => {
+  if (request.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
+  if (request.method !== "POST") return json({ error: "Method not allowed" }, 405);
+
+  const supabaseUrl = Deno.env.get("SUPABASE_URL");
+  const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+  const anonKey = Deno.env.get("SUPABASE_ANON_KEY");
+  if (!supabaseUrl || !serviceRoleKey || !anonKey) return json({ error: "Missing Supabase runtime configuration" }, 500);
+
+  const db = createClient(supabaseUrl, serviceRoleKey, { auth: { persistSession: false } });
+  try {
+    const cronSecret = request.headers.get("x-cron-secret");
+    const expectedCronSecret = Deno.env.get("CRON_SECRET");
+    const isCron = Boolean(cronSecret && expectedCronSecret && cronSecret === expectedCronSecret);
+    let ownerIds: string[];
+    if (isCron) {
+      const { data, error } = await db.from("app_settings").select("owner_id")
+        .eq("monitoring_enabled", true).lte("next_check_at", new Date().toISOString());
+      if (error) throw error;
+      ownerIds = (data ?? []).map((setting) => setting.owner_id);
+    } else {
+      const accessToken = request.headers.get("authorization")?.replace(/^Bearer\s+/i, "");
+      if (!accessToken) return json({ error: "Unauthorized" }, 401);
+      const auth = createClient(supabaseUrl, anonKey, {
+        global: { headers: { Authorization: `Bearer ${accessToken}` } },
+        auth: { persistSession: false },
+      });
+      const { data, error } = await auth.auth.getUser(accessToken);
+      if (error || !data.user) return json({ error: "Unauthorized" }, 401);
+      ownerIds = [data.user.id];
+    }
+
+    const results = [];
+    for (const ownerId of ownerIds) {
+      try {
+        results.push({ ownerId, result: await runOwner(db, ownerId, isCron ? "cron" : "manual") });
+      } catch (error) {
+        results.push({ ownerId, error: error instanceof Error ? error.message : "Check failed" });
+      }
+    }
+    const failed = results.some((result) => "error" in result);
+    return json({ ok: !failed, results }, failed ? 500 : 200);
+  } catch (error) {
+    return json({ error: error instanceof Error ? error.message : "Check failed" }, 500);
+  }
+});

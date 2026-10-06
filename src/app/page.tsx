@@ -31,10 +31,10 @@ export default async function Home() {
     redirect("/login");
   }
 
-  const [settings, products, stores, watchTargets, inStock, lastRun] = await Promise.all([
+  const [settings, products, stores, watchTargets, inStock, lastRun, inStockRows, recentRestocks] = await Promise.all([
     supabase
       .from("app_settings")
-      .select("monitoring_enabled, check_interval_minutes")
+      .select("monitoring_enabled, check_interval_minutes, next_check_at")
       .maybeSingle(),
     supabase
       .from("products")
@@ -58,9 +58,21 @@ export default async function Home() {
       .order("started_at", { ascending: false })
       .limit(1)
       .maybeSingle(),
+    supabase
+      .from("stock_status")
+      .select("quantity,checked_at,products(item_name),stores(store_name,address)")
+      .gt("quantity", 0)
+      .order("checked_at", { ascending: false })
+      .limit(10),
+    supabase
+      .from("stock_events")
+      .select("id,current_quantity,created_at,products(item_name),stores(store_name)")
+      .eq("event_type", "restocked")
+      .order("created_at", { ascending: false })
+      .limit(10),
   ]);
 
-  const queryError = [settings, products, stores, watchTargets, inStock, lastRun].find(
+  const queryError = [settings, products, stores, watchTargets, inStock, lastRun, inStockRows, recentRestocks].find(
     (result) => result.error,
   )?.error;
 
@@ -73,6 +85,8 @@ export default async function Home() {
   ] as const;
 
   const email = typeof claimsData.claims.email === "string" ? claimsData.claims.email : "사용자";
+  const inventoryRows = (inStockRows.data ?? []) as unknown as Array<{ quantity: number; checked_at: string; products: { item_name: string } | null; stores: { store_name: string; address: string } | null }>;
+  const restockRows = (recentRestocks.data ?? []) as unknown as Array<{ id: number; current_quantity: number; created_at: string; products: { item_name: string } | null; stores: { store_name: string } | null }>;
 
   return (
     <AppShell activeNav="Dashboard" userEmail={email}>
@@ -138,6 +152,9 @@ export default async function Home() {
           <p className="mt-1 text-sm leading-6 text-slate-500">
             마지막 조회: {formatKst(lastRun.data?.started_at)}
           </p>
+          <p className="mt-1 text-sm leading-6 text-slate-500">
+            다음 예상 조회: {monitoringEnabled ? formatKst(settings.data?.next_check_at) : "모니터링 OFF"}
+          </p>
           {queryError ? (
             <p role="alert" className="mt-4 rounded-lg border border-red-500/20 bg-red-500/10 p-3 text-xs text-red-300">
               Dashboard 데이터를 불러오지 못했습니다: {queryError.message}
@@ -150,6 +167,35 @@ export default async function Home() {
               <li>• Telegram token은 Supabase Secret에만 저장</li>
               <li>• 외부 응답을 검증한 뒤 상태에 반영</li>
             </ul>
+          </div>
+        </article>
+      </section>
+
+      <section className="grid gap-4 xl:grid-cols-2">
+        <article className="rounded-xl border border-slate-800 bg-slate-900 p-5">
+          <h2 className="font-semibold text-slate-100">현재 재고가 있는 조합</h2>
+          <div className="mt-3 space-y-2">
+            {inventoryRows.map((row) => (
+              <div key={`${row.products?.item_name}:${row.stores?.store_name}`} className="rounded-lg border border-slate-800 p-3 text-sm">
+                <p className="font-medium text-slate-200">{row.products?.item_name}</p>
+                <p className="mt-1 text-slate-400">GS25 {row.stores?.store_name} · {row.quantity}개</p>
+                <p className="mt-1 truncate text-xs text-slate-600">{row.stores?.address}</p>
+              </div>
+            ))}
+            {!inventoryRows.length ? <p className="text-sm text-slate-500">현재 확인된 재고가 없습니다.</p> : null}
+          </div>
+        </article>
+        <article className="rounded-xl border border-slate-800 bg-slate-900 p-5">
+          <h2 className="font-semibold text-slate-100">최근 입고 이벤트</h2>
+          <div className="mt-3 space-y-2">
+            {restockRows.map((row) => (
+              <div key={row.id} className="rounded-lg border border-slate-800 p-3 text-sm">
+                <p className="font-medium text-slate-200">{row.products?.item_name}</p>
+                <p className="mt-1 text-slate-400">GS25 {row.stores?.store_name} · {row.current_quantity}개</p>
+                <p className="mt-1 text-xs text-slate-600">{formatKst(row.created_at)}</p>
+              </div>
+            ))}
+            {!restockRows.length ? <p className="text-sm text-slate-500">최근 입고 이벤트가 없습니다.</p> : null}
           </div>
         </article>
       </section>

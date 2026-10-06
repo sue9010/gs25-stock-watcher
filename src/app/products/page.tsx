@@ -13,11 +13,11 @@ export default async function ProductsPage() {
     <AppShell activeNav="Products" userEmail={email}>
       <section>
         <p className="text-xs font-semibold uppercase tracking-[0.22em] text-emerald-400">
-          Phase 4 · Product search
+          Live product search
         </p>
         <h1 className="mt-2 text-2xl font-semibold tracking-tight text-white">Products</h1>
         <p className="mt-2 text-sm text-slate-400">
-          상품명으로 GS25 상품을 검색하고 공식 응답의 상품코드를 확인합니다.
+          상품명으로 GS25 상품을 검색하고 감시 목록에 추가합니다.
         </p>
       </section>
       <ProductSearch />
