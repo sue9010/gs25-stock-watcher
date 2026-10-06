@@ -1,17 +1,17 @@
 import { NextResponse, type NextRequest } from "next/server";
 
-import {
-  Gs25ApiError,
-  productSearchQuerySchema,
-  searchGs25Products,
-} from "@/lib/gs25/products";
+import { searchProductsThroughEdge } from "@/lib/gs25/edge-search";
+import { productSearchQuerySchema } from "@/lib/gs25/products";
 import { createClient } from "@/lib/supabase/server";
 
 export async function GET(request: NextRequest) {
   const supabase = await createClient();
-  const { data } = await supabase.auth.getClaims();
+  const [{ data }, { data: sessionData }] = await Promise.all([
+    supabase.auth.getClaims(),
+    supabase.auth.getSession(),
+  ]);
 
-  if (!data?.claims) {
+  if (!data?.claims || !sessionData.session) {
     return NextResponse.json({ error: "인증이 필요합니다." }, { status: 401 });
   }
 
@@ -29,18 +29,20 @@ export async function GET(request: NextRequest) {
   }
 
   try {
-    const products = await searchGs25Products(query.data.keyword, query.data.limit);
+    const products = await searchProductsThroughEdge(
+      query.data.keyword,
+      query.data.limit,
+      sessionData.session.access_token,
+    );
 
     return NextResponse.json(
       { products },
       { headers: { "Cache-Control": "private, no-store" } },
     );
-  } catch (error) {
-    const status = error instanceof Gs25ApiError && error.status === 429 ? 429 : 502;
-
+  } catch {
     return NextResponse.json(
       { error: "GS25 상품 검색을 완료하지 못했습니다. 잠시 후 다시 시도해주세요." },
-      { status },
+      { status: 502 },
     );
   }
 }
