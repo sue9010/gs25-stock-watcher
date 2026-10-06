@@ -8,15 +8,12 @@ export const dynamic = "force-dynamic";
 
 type Product = {
   id: number;
-  item_code: string;
   item_name: string;
 };
 
 type Store = {
   id: number;
-  store_code: string;
   store_name: string;
-  address: string;
   latitude: number;
   longitude: number;
 };
@@ -25,7 +22,6 @@ type StockStatus = {
   product_id: number;
   store_id: number;
   quantity: number;
-  checked_at: string;
 };
 
 export default async function Home() {
@@ -39,19 +35,19 @@ export default async function Home() {
   const [productsResult, storesResult, statusesResult] = await Promise.all([
     supabase
       .from("products")
-      .select("id,item_code,item_name")
+      .select("id,item_name")
       .eq("enabled", true)
       .is("archived_at", null)
       .order("item_name"),
     supabase
       .from("stores")
-      .select("id,store_code,store_name,address,latitude,longitude")
+      .select("id,store_name,latitude,longitude")
       .eq("enabled", true)
       .is("archived_at", null)
       .order("store_name"),
     supabase
       .from("stock_status")
-      .select("product_id,store_id,quantity,checked_at"),
+      .select("product_id,store_id,quantity"),
   ]);
 
   const queryError = productsResult.error ?? storesResult.error ?? statusesResult.error;
@@ -70,7 +66,6 @@ export default async function Home() {
       return {
         ...store,
         quantity: status?.quantity ?? null,
-        checkedAt: status?.checked_at ?? null,
       };
     }),
   }));
@@ -88,9 +83,6 @@ export default async function Home() {
           <h1 className="mt-2 text-2xl font-semibold tracking-tight text-white">
             GS25 재고 모니터링
           </h1>
-          <p className="mt-2 text-sm text-slate-400">
-            상품별로 모니터링 매장과 마지막 확인 재고를 표시합니다.
-          </p>
         </div>
 
         <form action={checkNow}>
