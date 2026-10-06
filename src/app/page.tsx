@@ -3,22 +3,34 @@ import { checkNow } from "@/features/inventory/actions";
 import { createClient } from "@/lib/supabase/server";
 import { redirect } from "next/navigation";
 
-const architecture = [
-  ["Web", "Next.js 16 · Vercel"],
-  ["Data", "Supabase PostgreSQL · RLS"],
-  ["Worker", "Supabase Edge Functions · Cron"],
-  ["Source", "daiso-mcp GS25 HTTP API"],
-  ["Notify", "Telegram adapter"],
-] as const;
-
 const kstFormatter = new Intl.DateTimeFormat("ko-KR", {
   dateStyle: "medium",
   timeStyle: "short",
   timeZone: "Asia/Seoul",
 });
 
-function formatKst(value: string | undefined) {
-  return value ? kstFormatter.format(new Date(value)) : "아직 실행되지 않음";
+type Product = {
+  id: number;
+  item_code: string;
+  item_name: string;
+};
+
+type Store = {
+  id: number;
+  store_code: string;
+  store_name: string;
+  address: string;
+};
+
+type StockStatus = {
+  product_id: number;
+  store_id: number;
+  quantity: number;
+  checked_at: string;
+};
+
+function formatKst(value: string | null | undefined) {
+  return value ? kstFormatter.format(new Date(value)) : "아직 조회되지 않음";
 }
 
 export const dynamic = "force-dynamic";
@@ -31,198 +43,143 @@ export default async function Home() {
     redirect("/login");
   }
 
-  const [settings, products, stores, inStock, lastRun, inStockRows, recentRestocks] = await Promise.all([
-    supabase
-      .from("app_settings")
-      .select("monitoring_enabled, check_interval_minutes, next_check_at")
-      .maybeSingle(),
+  const [productsResult, storesResult, statusesResult] = await Promise.all([
     supabase
       .from("products")
-      .select("*", { count: "exact", head: true })
+      .select("id,item_code,item_name")
       .eq("enabled", true)
-      .is("archived_at", null),
+      .is("archived_at", null)
+      .order("item_name"),
     supabase
       .from("stores")
-      .select("*", { count: "exact", head: true })
+      .select("id,store_code,store_name,address")
       .eq("enabled", true)
-      .is("archived_at", null),
+      .is("archived_at", null)
+      .order("store_name"),
     supabase
       .from("stock_status")
-      .select(
-        "product_id,products!inner(enabled,archived_at),stores!inner(enabled,archived_at)",
-        { count: "exact", head: true },
-      )
-      .gt("quantity", 0)
-      .eq("products.enabled", true)
-      .is("products.archived_at", null)
-      .eq("stores.enabled", true)
-      .is("stores.archived_at", null),
-    supabase
-      .from("check_runs")
-      .select("started_at, status")
-      .order("started_at", { ascending: false })
-      .limit(1)
-      .maybeSingle(),
-    supabase
-      .from("stock_status")
-      .select(
-        "quantity,checked_at,products!inner(item_name,enabled,archived_at),stores!inner(store_name,address,enabled,archived_at)",
-      )
-      .gt("quantity", 0)
-      .eq("products.enabled", true)
-      .is("products.archived_at", null)
-      .eq("stores.enabled", true)
-      .is("stores.archived_at", null)
-      .order("checked_at", { ascending: false })
-      .limit(10),
-    supabase
-      .from("stock_events")
-      .select("id,current_quantity,created_at,products(item_name),stores(store_name)")
-      .eq("event_type", "restocked")
-      .order("created_at", { ascending: false })
-      .limit(10),
+      .select("product_id,store_id,quantity,checked_at"),
   ]);
 
-  const queryError = [settings, products, stores, inStock, lastRun, inStockRows, recentRestocks].find(
-    (result) => result.error,
-  )?.error;
+  const queryError = productsResult.error ?? storesResult.error ?? statusesResult.error;
+  const products = (productsResult.data ?? []) as Product[];
+  const stores = (storesResult.data ?? []) as Store[];
+  const statuses = (statusesResult.data ?? []) as StockStatus[];
 
-  const monitoringEnabled = settings.data?.monitoring_enabled ?? false;
-  const activeProductCount = products.count ?? 0;
-  const activeStoreCount = stores.count ?? 0;
-  const watchCombinationCount = activeProductCount * activeStoreCount;
-  const metrics = [
-    { label: "모니터링", value: monitoringEnabled ? "ON" : "OFF" },
-    { label: "활성 상품", value: String(activeProductCount) },
-    { label: "활성 매장", value: String(activeStoreCount) },
-    { label: "감시 조합", value: String(watchCombinationCount) },
-  ] as const;
+  const statusByCombination = new Map(
+    statuses.map((status) => [`${status.product_id}:${status.store_id}`, status]),
+  );
 
-  const email = typeof claimsData.claims.email === "string" ? claimsData.claims.email : "사용자";
-  const inventoryRows = (inStockRows.data ?? []) as unknown as Array<{
-    quantity: number;
-    checked_at: string;
-    products: { item_name: string } | null;
-    stores: { store_name: string; address: string } | null;
-  }>;
-  const restockRows = (recentRestocks.data ?? []) as unknown as Array<{
-    id: number;
-    current_quantity: number;
-    created_at: string;
-    products: { item_name: string } | null;
-    stores: { store_name: string } | null;
-  }>;
+  const monitoringRows = products.flatMap((product) =>
+    stores.map((store) => ({
+      product,
+      store,
+      status: statusByCombination.get(`${product.id}:${store.id}`) ?? null,
+    })),
+  );
+
+  const email =
+    typeof claimsData.claims.email === "string" ? claimsData.claims.email : "사용자";
 
   return (
     <AppShell activeNav="Dashboard" userEmail={email}>
-      <section className="rounded-2xl border border-slate-800 bg-slate-900/70 p-5 shadow-2xl shadow-slate-950/30 sm:p-7">
-        <div className="flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
-          <div>
-            <p className="text-xs font-semibold uppercase tracking-[0.22em] text-emerald-400">
-              Live operations
-            </p>
-            <h1 className="mt-2 text-2xl font-semibold tracking-tight text-white sm:text-3xl">
-              GS25 재고 모니터링 대시보드
-            </h1>
-            <p className="mt-3 max-w-2xl text-sm leading-6 text-slate-400">
-              활성 상품과 활성 매장의 모든 조합을 자동으로 감시하고, 현재 재고와 최근 입고 이벤트를 한 곳에서 확인합니다.
-            </p>
-          </div>
-          <form action={checkNow}><button type="submit" className="h-10 rounded-lg bg-emerald-400 px-4 text-sm font-semibold text-slate-950">지금 조회</button></form>
+      <section className="flex flex-col gap-4 rounded-2xl border border-slate-800 bg-slate-900/70 p-5 sm:flex-row sm:items-center sm:justify-between sm:p-6">
+        <div>
+          <p className="text-xs font-semibold uppercase tracking-[0.22em] text-emerald-400">
+            Monitoring
+          </p>
+          <h1 className="mt-2 text-2xl font-semibold tracking-tight text-white">
+            GS25 재고 모니터링
+          </h1>
+          <p className="mt-2 text-sm text-slate-400">
+            활성 상품과 활성 매장의 모든 조합을 자동으로 조회합니다.
+          </p>
         </div>
+
+        <form action={checkNow}>
+          <button
+            type="submit"
+            className="h-10 w-full rounded-lg bg-emerald-400 px-5 text-sm font-semibold text-slate-950 transition hover:bg-emerald-300 sm:w-auto"
+          >
+            지금 조회
+          </button>
+        </form>
       </section>
 
-      <section aria-label="모니터링 요약" className="grid grid-cols-2 gap-3 xl:grid-cols-4">
-        {metrics.map((metric) => (
-          <article key={metric.label} className="rounded-xl border border-slate-800 bg-slate-900 p-4">
-            <p className="text-xs font-medium text-slate-500">{metric.label}</p>
-            <p className="mt-2 text-xl font-semibold text-slate-200">{metric.value}</p>
-          </article>
-        ))}
-      </section>
-
-      <section className="grid gap-4 xl:grid-cols-[minmax(0,1.45fr)_minmax(280px,0.75fr)]">
-        <article className="overflow-hidden rounded-xl border border-slate-800 bg-slate-900">
-          <div className="border-b border-slate-800 px-5 py-4">
-            <h2 className="font-semibold text-slate-100">운영 연결 상태</h2>
-            <p className="mt-1 text-xs text-slate-500">운영 구성요소의 연결 상태입니다.</p>
-          </div>
-          <div className="divide-y divide-slate-800">
-            {architecture.map(([label, value], index) => (
-              <div key={label} className="flex items-center gap-4 px-5 py-3.5">
-                <span className="flex size-7 items-center justify-center rounded-md bg-slate-800 text-xs font-semibold text-slate-400">
-                  {index + 1}
-                </span>
-                <div className="min-w-0 flex-1">
-                  <p className="text-xs text-slate-500">{label}</p>
-                  <p className="truncate text-sm font-medium text-slate-200">{value}</p>
-                </div>
-                <span
-                  className={`rounded-full border px-2 py-1 text-[11px] font-medium ${
-                    "border-emerald-500/20 bg-emerald-500/10 text-emerald-300"
-                  }`}
-                >
-                  연결됨
-                </span>
-              </div>
-            ))}
-          </div>
-        </article>
-
-        <article className="rounded-xl border border-slate-800 bg-slate-900 p-5">
-          <h2 className="font-semibold text-slate-100">현재 상태</h2>
-          <p className="mt-2 text-sm leading-6 text-slate-400">
-            재고 보유 조합 {inStock.count ?? 0}개 · 조회 주기 {settings.data?.check_interval_minutes ?? 10}분
-          </p>
-          <p className="mt-1 text-sm leading-6 text-slate-500">
-            마지막 조회: {formatKst(lastRun.data?.started_at)}
-          </p>
-          <p className="mt-1 text-sm leading-6 text-slate-500">
-            다음 예상 조회: {monitoringEnabled ? formatKst(settings.data?.next_check_at) : "모니터링 OFF"}
-          </p>
-          {queryError ? (
-            <p role="alert" className="mt-4 rounded-lg border border-red-500/20 bg-red-500/10 p-3 text-xs text-red-300">
-              Dashboard 데이터를 불러오지 못했습니다: {queryError.message}
+      <section className="overflow-hidden rounded-2xl border border-slate-800 bg-slate-900">
+        <div className="flex flex-col gap-1 border-b border-slate-800 px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <h2 className="font-semibold text-slate-100">모니터링 중인 재고</h2>
+            <p className="mt-1 text-xs text-slate-500">
+              상품 {products.length}개 × 매장 {stores.length}개 · 총 {monitoringRows.length}개 조합
             </p>
-          ) : null}
-          <div className="mt-5 rounded-lg border border-slate-800 bg-slate-950/60 p-4">
-            <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">Safety baseline</p>
-            <ul className="mt-3 space-y-2 text-xs leading-5 text-slate-400">
-              <li>• Service role key는 browser에 전달하지 않음</li>
-              <li>• Telegram token은 Supabase Secret에만 저장</li>
-              <li>• 외부 응답을 검증한 뒤 상태에 반영</li>
-            </ul>
           </div>
-        </article>
-      </section>
+        </div>
 
-      <section className="grid gap-4 xl:grid-cols-2">
-        <article className="rounded-xl border border-slate-800 bg-slate-900 p-5">
-          <h2 className="font-semibold text-slate-100">현재 재고가 있는 조합</h2>
-          <div className="mt-3 space-y-2">
-            {inventoryRows.map((row) => (
-              <div key={`${row.products?.item_name}:${row.stores?.store_name}`} className="rounded-lg border border-slate-800 p-3 text-sm">
-                <p className="font-medium text-slate-200">{row.products?.item_name}</p>
-                <p className="mt-1 text-slate-400">GS25 {row.stores?.store_name} · {row.quantity}개</p>
-                <p className="mt-1 truncate text-xs text-slate-600">{row.stores?.address}</p>
-              </div>
-            ))}
-            {!inventoryRows.length ? <p className="text-sm text-slate-500">현재 확인된 재고가 없습니다.</p> : null}
+        {queryError ? (
+          <p
+            role="alert"
+            className="m-5 rounded-lg border border-red-500/20 bg-red-500/10 p-3 text-sm text-red-300"
+          >
+            데이터를 불러오지 못했습니다: {queryError.message}
+          </p>
+        ) : null}
+
+        {!queryError && monitoringRows.length === 0 ? (
+          <div className="px-5 py-12 text-center">
+            <p className="text-sm font-medium text-slate-300">모니터링 중인 조합이 없습니다.</p>
+            <p className="mt-1 text-xs text-slate-500">
+              Products와 Stores에 각각 활성 항목을 추가하면 자동으로 표시됩니다.
+            </p>
           </div>
-        </article>
-        <article className="rounded-xl border border-slate-800 bg-slate-900 p-5">
-          <h2 className="font-semibold text-slate-100">최근 입고 이벤트</h2>
-          <div className="mt-3 space-y-2">
-            {restockRows.map((row) => (
-              <div key={row.id} className="rounded-lg border border-slate-800 p-3 text-sm">
-                <p className="font-medium text-slate-200">{row.products?.item_name}</p>
-                <p className="mt-1 text-slate-400">GS25 {row.stores?.store_name} · {row.current_quantity}개</p>
-                <p className="mt-1 text-xs text-slate-600">{formatKst(row.created_at)}</p>
-              </div>
-            ))}
-            {!restockRows.length ? <p className="text-sm text-slate-500">최근 입고 이벤트가 없습니다.</p> : null}
+        ) : null}
+
+        {!queryError && monitoringRows.length > 0 ? (
+          <div className="overflow-x-auto">
+            <table className="min-w-full divide-y divide-slate-800 text-left text-sm">
+              <thead className="bg-slate-950/50 text-xs uppercase tracking-wide text-slate-500">
+                <tr>
+                  <th className="px-5 py-3 font-medium">상품</th>
+                  <th className="px-5 py-3 font-medium">매장</th>
+                  <th className="px-5 py-3 font-medium">마지막 재고</th>
+                  <th className="px-5 py-3 font-medium">마지막 조회</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-800">
+                {monitoringRows.map(({ product, store, status }) => (
+                  <tr key={`${product.id}:${store.id}`} className="align-top">
+                    <td className="px-5 py-4">
+                      <p className="font-medium text-slate-100">{product.item_name}</p>
+                      <p className="mt-1 text-xs text-slate-500">{product.item_code}</p>
+                    </td>
+                    <td className="px-5 py-4">
+                      <p className="font-medium text-slate-200">GS25 {store.store_name}</p>
+                      <p className="mt-1 max-w-md text-xs text-slate-500">{store.address}</p>
+                    </td>
+                    <td className="px-5 py-4">
+                      {status ? (
+                        <span
+                          className={`inline-flex min-w-16 justify-center rounded-full border px-3 py-1 text-xs font-semibold ${
+                            status.quantity > 0
+                              ? "border-emerald-500/20 bg-emerald-500/10 text-emerald-300"
+                              : "border-slate-700 bg-slate-800 text-slate-400"
+                          }`}
+                        >
+                          {status.quantity}개
+                        </span>
+                      ) : (
+                        <span className="text-sm text-slate-600">미조회</span>
+                      )}
+                    </td>
+                    <td className="whitespace-nowrap px-5 py-4 text-sm text-slate-400">
+                      {formatKst(status?.checked_at)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
-        </article>
+        ) : null}
       </section>
     </AppShell>
   );
