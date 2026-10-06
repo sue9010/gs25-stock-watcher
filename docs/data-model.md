@@ -2,9 +2,19 @@
 
 ## Ownership and deletion
 
-All application rows are owned by a Supabase Auth user. RLS compares `owner_id` with `(select auth.uid())`, and ownership columns are indexed. Products, stores, watch targets, and notification targets use `archived_at` instead of browser-accessible hard deletion so stock and notification history remains referentially intact.
+All application rows are owned by a Supabase Auth user. RLS compares `owner_id` with `(select auth.uid())`, and ownership columns are indexed. Products, stores, and notification targets use `archived_at` instead of browser-accessible hard deletion so stock and notification history remains referentially intact.
 
-Products and stores have `(id, owner_id)` candidate keys. Dependent tables reference those composite keys, so a caller cannot construct a watch target, status, or event that combines rows from different owners even when IDs are known.
+Products and stores have `(id, owner_id)` candidate keys. Dependent tables reference those composite keys, so a caller cannot construct a status or event that combines rows from different owners even when IDs are known.
+
+## Automatic monitoring model
+
+There is no user-managed watch-target entity. The effective monitoring set is derived at run time as:
+
+```text
+active products × active stores
+```
+
+A product participates when `enabled = true` and `archived_at is null`. A store participates under the same conditions. Adding or re-enabling either side therefore changes the monitoring set automatically without creating a separate relationship row.
 
 ## Relations
 
@@ -13,8 +23,6 @@ erDiagram
   AUTH_USERS ||--o{ PRODUCTS : owns
   AUTH_USERS ||--o{ STORES : owns
   AUTH_USERS ||--|| APP_SETTINGS : configures
-  PRODUCTS ||--o{ WATCH_TARGETS : watches
-  STORES ||--o{ WATCH_TARGETS : watches
   PRODUCTS ||--o{ STOCK_STATUS : has
   STORES ||--o{ STOCK_STATUS : has
   PRODUCTS ||--o{ STOCK_EVENTS : records
@@ -27,7 +35,7 @@ erDiagram
 
 ## Write boundaries
 
-- Authenticated browser clients may select, insert, and update their own products, stores, watch targets, notification targets, and settings.
+- Authenticated browser clients may select, insert, and update their own products, stores, notification targets, and settings.
 - Browser clients have no table-level `DELETE` privilege. Archive actions are updates.
 - Stock status, events, check runs, and delivery attempts are read-only to browser clients. Edge Functions write them with server-side credentials.
 - The Telegram bot token is not represented in any table. Only destination identifiers such as `chat_id` are stored.

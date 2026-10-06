@@ -17,7 +17,7 @@ export default async function ProductsPage() {
         </p>
         <h1 className="mt-2 text-2xl font-semibold tracking-tight text-white">Products</h1>
         <p className="mt-2 text-sm text-slate-400">
-          상품명으로 GS25 상품을 검색하고 감시 목록에 추가합니다.
+          상품명으로 GS25 상품을 검색해 추가합니다. 활성 상품은 모든 활성 매장에서 자동으로 감시됩니다.
         </p>
       </section>
       <ProductSearch />

@@ -31,7 +31,7 @@ export default async function Home() {
     redirect("/login");
   }
 
-  const [settings, products, stores, watchTargets, inStock, lastRun, inStockRows, recentRestocks] = await Promise.all([
+  const [settings, products, stores, inStock, lastRun, inStockRows, recentRestocks] = await Promise.all([
     supabase
       .from("app_settings")
       .select("monitoring_enabled, check_interval_minutes, next_check_at")
@@ -47,11 +47,16 @@ export default async function Home() {
       .eq("enabled", true)
       .is("archived_at", null),
     supabase
-      .from("watch_targets")
-      .select("*", { count: "exact", head: true })
-      .eq("enabled", true)
-      .is("archived_at", null),
-    supabase.from("stock_status").select("*", { count: "exact", head: true }).gt("quantity", 0),
+      .from("stock_status")
+      .select(
+        "product_id,products!inner(enabled,archived_at),stores!inner(enabled,archived_at)",
+        { count: "exact", head: true },
+      )
+      .gt("quantity", 0)
+      .eq("products.enabled", true)
+      .is("products.archived_at", null)
+      .eq("stores.enabled", true)
+      .is("stores.archived_at", null),
     supabase
       .from("check_runs")
       .select("started_at, status")
@@ -60,8 +65,14 @@ export default async function Home() {
       .maybeSingle(),
     supabase
       .from("stock_status")
-      .select("quantity,checked_at,products(item_name),stores(store_name,address)")
+      .select(
+        "quantity,checked_at,products!inner(item_name,enabled,archived_at),stores!inner(store_name,address,enabled,archived_at)",
+      )
       .gt("quantity", 0)
+      .eq("products.enabled", true)
+      .is("products.archived_at", null)
+      .eq("stores.enabled", true)
+      .is("stores.archived_at", null)
       .order("checked_at", { ascending: false })
       .limit(10),
     supabase
@@ -72,21 +83,35 @@ export default async function Home() {
       .limit(10),
   ]);
 
-  const queryError = [settings, products, stores, watchTargets, inStock, lastRun, inStockRows, recentRestocks].find(
+  const queryError = [settings, products, stores, inStock, lastRun, inStockRows, recentRestocks].find(
     (result) => result.error,
   )?.error;
 
   const monitoringEnabled = settings.data?.monitoring_enabled ?? false;
+  const activeProductCount = products.count ?? 0;
+  const activeStoreCount = stores.count ?? 0;
+  const watchCombinationCount = activeProductCount * activeStoreCount;
   const metrics = [
     { label: "모니터링", value: monitoringEnabled ? "ON" : "OFF" },
-    { label: "활성 상품", value: String(products.count ?? 0) },
-    { label: "활성 매장", value: String(stores.count ?? 0) },
-    { label: "Watch Targets", value: String(watchTargets.count ?? 0) },
+    { label: "활성 상품", value: String(activeProductCount) },
+    { label: "활성 매장", value: String(activeStoreCount) },
+    { label: "감시 조합", value: String(watchCombinationCount) },
   ] as const;
 
   const email = typeof claimsData.claims.email === "string" ? claimsData.claims.email : "사용자";
-  const inventoryRows = (inStockRows.data ?? []) as unknown as Array<{ quantity: number; checked_at: string; products: { item_name: string } | null; stores: { store_name: string; address: string } | null }>;
-  const restockRows = (recentRestocks.data ?? []) as unknown as Array<{ id: number; current_quantity: number; created_at: string; products: { item_name: string } | null; stores: { store_name: string } | null }>;
+  const inventoryRows = (inStockRows.data ?? []) as unknown as Array<{
+    quantity: number;
+    checked_at: string;
+    products: { item_name: string } | null;
+    stores: { store_name: string; address: string } | null;
+  }>;
+  const restockRows = (recentRestocks.data ?? []) as unknown as Array<{
+    id: number;
+    current_quantity: number;
+    created_at: string;
+    products: { item_name: string } | null;
+    stores: { store_name: string } | null;
+  }>;
 
   return (
     <AppShell activeNav="Dashboard" userEmail={email}>
@@ -100,7 +125,7 @@ export default async function Home() {
               GS25 재고 모니터링 대시보드
             </h1>
             <p className="mt-3 max-w-2xl text-sm leading-6 text-slate-400">
-              상품과 매장별 현재 재고, 최근 조회 결과와 입고 이벤트를 한 곳에서 관리합니다.
+              활성 상품과 활성 매장의 모든 조합을 자동으로 감시하고, 현재 재고와 최근 입고 이벤트를 한 곳에서 확인합니다.
             </p>
           </div>
           <form action={checkNow}><button type="submit" className="h-10 rounded-lg bg-emerald-400 px-4 text-sm font-semibold text-slate-950">지금 조회</button></form>

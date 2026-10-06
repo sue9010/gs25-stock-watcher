@@ -7,7 +7,6 @@ const navigation = [
   { label: "Dashboard", href: "/" },
   { label: "Products", href: "/products" },
   { label: "Stores", href: "/stores" },
-  { label: "Watch List", href: "/watch-list" },
   { label: "Notifications", href: "/notifications" },
   { label: "History", href: "/history" },
   { label: "Settings", href: "/settings" },
@@ -15,7 +14,7 @@ const navigation = [
 
 type AppShellProps = Readonly<{
   children: ReactNode;
-  activeNav: "Dashboard" | "Products" | "Stores" | "Watch List" | "Notifications" | "History" | "Settings";
+  activeNav: "Dashboard" | "Products" | "Stores" | "Notifications" | "History" | "Settings";
   userEmail: string;
 }>;
 

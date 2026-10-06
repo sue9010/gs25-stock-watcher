@@ -95,24 +95,28 @@ async function runOwner(db: ReturnType<typeof createClient>, ownerId: string, so
   if (runError) throw runError;
 
   try {
-    const { data: targets, error: targetsError } = await db.from("watch_targets")
-      .select("product_id,store_id,products!inner(id,item_code,item_name,enabled,archived_at),stores!inner(id,store_code,store_name,address,latitude,longitude,enabled,archived_at)")
-      .eq("owner_id", ownerId).eq("enabled", true).is("archived_at", null)
-      .eq("products.enabled", true).is("products.archived_at", null)
-      .eq("stores.enabled", true).is("stores.archived_at", null);
-    if (targetsError) throw targetsError;
+    const [{ data: products, error: productsError }, { data: stores, error: storesError }] = await Promise.all([
+      db.from("products")
+        .select("id,item_code,item_name")
+        .eq("owner_id", ownerId)
+        .eq("enabled", true)
+        .is("archived_at", null)
+        .order("id"),
+      db.from("stores")
+        .select("id,store_code,store_name,address,latitude,longitude")
+        .eq("owner_id", ownerId)
+        .eq("enabled", true)
+        .is("archived_at", null)
+        .order("id"),
+    ]);
+    if (productsError) throw productsError;
+    if (storesError) throw storesError;
 
-    const byProduct = new Map<number, { product: Product; stores: Store[] }>();
-    for (const target of targets ?? []) {
-      const product = target.products as unknown as Product;
-      const store = target.stores as unknown as Store;
-      const existing = byProduct.get(product.id);
-      if (existing) existing.stores.push(store);
-      else byProduct.set(product.id, { product, stores: [store] });
-    }
+    const activeProducts = (products ?? []) as Product[];
+    const activeStores = (stores ?? []) as Store[];
+    const storeClusters = clusterStores(activeStores);
+    const requestCount = activeProducts.length * storeClusters.length;
 
-    let requestCount = 0;
-    for (const item of byProduct.values()) requestCount += clusterStores(item.stores).length;
     if (requestCount > settings.max_requests_per_run) throw new Error(`요청 수 ${requestCount}회가 실행 한도보다 큽니다.`);
 
     const { data: recentRuns, error: recentRunsError } = await db.from("check_runs").select("requests_made")
@@ -131,8 +135,8 @@ async function runOwner(db: ReturnType<typeof createClient>, ownerId: string, so
     if (destinationsError) throw destinationsError;
 
     let checkedStores = 0;
-    for (const { product, stores } of byProduct.values()) {
-      for (const cluster of clusterStores(stores)) {
+    for (const product of activeProducts) {
+      for (const cluster of storeClusters) {
         const inventory = await fetchInventory(product.item_code, cluster[0].latitude, cluster[0].longitude);
         const inventoryByStore = new Map<string, InventoryStore>(inventory.map((row) => [row.storeCode, row]));
         for (const store of cluster) {
@@ -218,12 +222,17 @@ async function runOwner(db: ReturnType<typeof createClient>, ownerId: string, so
     const { error: completionError } = await db.from("check_runs").update({
       status: "succeeded",
       finished_at: finishedAt,
-      products_checked: byProduct.size,
+      products_checked: activeStores.length > 0 ? activeProducts.length : 0,
       stores_checked: checkedStores,
       requests_made: requestCount,
     }).eq("id", run.id);
     if (completionError) throw completionError;
-    return { runId: run.id, products: byProduct.size, stores: checkedStores, requests: requestCount };
+    return {
+      runId: run.id,
+      products: activeStores.length > 0 ? activeProducts.length : 0,
+      stores: checkedStores,
+      requests: requestCount,
+    };
   } catch (error) {
     await db.from("check_runs").update({
       status: "failed",

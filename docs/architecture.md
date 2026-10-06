@@ -32,9 +32,15 @@ Vercel은 관리 UI와 인증된 검색 proxy를 담당한다. PC와 Vercel 요�
 - Supabase Edge Functions: Cron, 수동 재고 검사, Telegram 전송처럼 Vercel 요청과 독립적으로 실행되어야 하는 작업.
 - PostgreSQL: source of truth, row ownership, 최신 상태, 이벤트와 실행 이력.
 
+## Monitoring target model
+
+사용자는 Products와 Stores만 관리한다. 별도의 Watch List를 만들거나 상품과 매장을 직접 연결하지 않는다.
+
+`check-stock`은 실행 시점에 `enabled = true`이고 `archived_at is null`인 상품과 매장을 각각 조회하고, 모든 활성 상품 × 모든 활성 매장을 자동 감시 대상으로 사용한다. 따라서 상품 또는 매장을 추가·재활성화하면 다음 조회부터 자동으로 전체 조합에 포함되고, 비활성화·archive하면 자동으로 제외된다.
+
 ## Inventory request model
 
-`daiso-mcp`는 한 상품과 좌표를 기준으로 주변 여러 매장의 재고를 반환한다. 활성 매장을 900m 범위로 clustering하고 상품 × cluster당 한 번 호출한 뒤 `storeCode`로 감시 대상을 추린다. 매장 누락이나 `realStockQuantity=null`은 품절로 간주하지 않는다.
+`daiso-mcp`는 한 상품과 좌표를 기준으로 주변 여러 매장의 재고를 반환한다. 모든 활성 매장을 800m 범위로 clustering하고 상품 × cluster당 한 번 호출한 뒤 `storeCode`로 대상 매장의 결과를 추린다. 매장 누락이나 `realStockQuantity=null`은 품절로 간주하지 않는다.
 
 공개 API의 GS25 계열 GET 제한은 IP당 KST 하루 3,000회다. 기본 안전 예산은 2,400회/일, 실행당 재고 요청 최대 12회다. 규모가 이 범위를 넘으면 조용히 일부만 검사하지 않고 configuration failure로 표시하며 `daiso-mcp` 자체 배포를 검토한다.
 
