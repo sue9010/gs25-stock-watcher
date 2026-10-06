@@ -1,6 +1,7 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import Script from "next/script";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 type StoreStatus = {
   id: number;
@@ -20,18 +21,40 @@ type MonitoringDashboardProps = {
   products: ProductMonitoring[];
 };
 
-function mapUrl(store: StoreStatus) {
-  const latDelta = 0.006;
-  const lngDelta = 0.008;
-  const left = store.longitude - lngDelta;
-  const bottom = store.latitude - latDelta;
-  const right = store.longitude + lngDelta;
-  const top = store.latitude + latDelta;
-  const bbox = encodeURIComponent(`${left},${bottom},${right},${top}`);
-  const marker = encodeURIComponent(`${store.latitude},${store.longitude}`);
+type KakaoLatLng = object;
 
-  return `https://www.openstreetmap.org/export/embed.html?bbox=${bbox}&layer=mapnik&marker=${marker}`;
+type KakaoMap = {
+  setCenter: (position: KakaoLatLng) => void;
+  setLevel: (level: number) => void;
+};
+
+type KakaoMarker = {
+  setPosition: (position: KakaoLatLng) => void;
+  setMap: (map: KakaoMap) => void;
+};
+
+type KakaoMapsApi = {
+  load: (callback: () => void) => void;
+  LatLng: new (latitude: number, longitude: number) => KakaoLatLng;
+  Map: new (
+    container: HTMLElement,
+    options: { center: KakaoLatLng; level: number },
+  ) => KakaoMap;
+  Marker: new (options: {
+    position: KakaoLatLng;
+    map?: KakaoMap;
+  }) => KakaoMarker;
+};
+
+declare global {
+  interface Window {
+    kakao?: {
+      maps: KakaoMapsApi;
+    };
+  }
 }
+
+const kakaoAppKey = process.env.NEXT_KAKAO_MAP_APP_KEY ?? "";
 
 export function MonitoringDashboard({ products }: MonitoringDashboardProps) {
   const allStores = useMemo(() => {
@@ -49,100 +72,156 @@ export function MonitoringDashboard({ products }: MonitoringDashboardProps) {
   const [selectedStoreId, setSelectedStoreId] = useState<number | null>(
     allStores[0]?.id ?? null,
   );
+  const [mapReady, setMapReady] = useState(false);
+  const mapContainerRef = useRef<HTMLDivElement>(null);
+  const mapRef = useRef<KakaoMap | null>(null);
+  const markerRef = useRef<KakaoMarker | null>(null);
 
   const selectedStore =
     allStores.find((store) => store.id === selectedStoreId) ?? allStores[0] ?? null;
 
+  function initializeMap() {
+    if (!selectedStore || !mapContainerRef.current || !window.kakao?.maps) return;
+
+    window.kakao.maps.load(() => {
+      if (!mapContainerRef.current || !window.kakao?.maps) return;
+
+      const position = new window.kakao.maps.LatLng(
+        selectedStore.latitude,
+        selectedStore.longitude,
+      );
+
+      const map = new window.kakao.maps.Map(mapContainerRef.current, {
+        center: position,
+        level: 4,
+      });
+
+      const marker = new window.kakao.maps.Marker({
+        position,
+        map,
+      });
+
+      mapRef.current = map;
+      markerRef.current = marker;
+      setMapReady(true);
+    });
+  }
+
+  useEffect(() => {
+    if (!mapReady || !selectedStore || !window.kakao?.maps || !mapRef.current) return;
+
+    const position = new window.kakao.maps.LatLng(
+      selectedStore.latitude,
+      selectedStore.longitude,
+    );
+
+    mapRef.current.setCenter(position);
+    mapRef.current.setLevel(4);
+    markerRef.current?.setPosition(position);
+    markerRef.current?.setMap(mapRef.current);
+  }, [mapReady, selectedStore]);
+
   if (products.length === 0 || allStores.length === 0) {
     return (
-      <section className="rounded-2xl border border-slate-800 bg-slate-900 px-5 py-12 text-center">
+      <section className="rounded-xl border border-slate-800 bg-slate-900 px-5 py-10 text-center">
         <p className="text-sm font-medium text-slate-300">모니터링 중인 항목이 없습니다.</p>
       </section>
     );
   }
 
   return (
-    <section className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_420px]">
-      <div className="grid content-start gap-4 md:grid-cols-2">
-        {products.map((product) => (
-          <article
-            key={product.id}
-            className="rounded-2xl border border-slate-800 bg-slate-900 p-5"
-          >
-            <h2 className="mb-4 font-semibold text-slate-100">{product.item_name}</h2>
+    <>
+      {kakaoAppKey ? (
+        <Script
+          src={`https://dapi.kakao.com/v2/maps/sdk.js?appkey=${kakaoAppKey}&autoload=false`}
+          strategy="afterInteractive"
+          onLoad={initializeMap}
+        />
+      ) : null}
 
-            <div className="space-y-1.5">
-              {product.stores.map((store) => {
-                const isSelected = selectedStore?.id === store.id;
-                const isOutOfStock = store.quantity === 0;
-                const hasStock = store.quantity !== null && store.quantity > 0;
+      <section className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_380px]">
+        <div className="space-y-3">
+          {products.map((product) => (
+            <article
+              key={product.id}
+              className="rounded-xl border border-slate-800 bg-slate-900 px-4 py-3"
+            >
+              <h2 className="mb-2.5 text-sm font-semibold text-slate-100">
+                {product.item_name}
+              </h2>
 
-                return (
-                  <button
-                    key={store.id}
-                    type="button"
-                    onClick={() => setSelectedStoreId(store.id)}
-                    className={`flex w-full items-center justify-between gap-3 rounded-lg px-3 py-2 text-left transition ${
-                      isSelected
-                        ? "bg-emerald-400/10"
-                        : "hover:bg-slate-800/70"
-                    }`}
-                  >
-                    <span
-                      className={`truncate text-sm ${
-                        isOutOfStock
-                          ? "text-slate-600"
-                          : isSelected
-                            ? "font-medium text-emerald-300"
-                            : "text-slate-300"
+              <div className="flex flex-wrap gap-1.5">
+                {product.stores.map((store) => {
+                  const selected = selectedStore?.id === store.id;
+                  const outOfStock = store.quantity === 0;
+                  const hasStock = store.quantity !== null && store.quantity > 0;
+
+                  return (
+                    <button
+                      key={store.id}
+                      type="button"
+                      onClick={() => setSelectedStoreId(store.id)}
+                      className={`inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-xs transition ${
+                        selected
+                          ? "border-emerald-400/40 bg-emerald-400/10"
+                          : outOfStock
+                            ? "border-slate-800 bg-slate-950/30 hover:border-slate-700"
+                            : "border-slate-700 bg-slate-950/50 hover:border-slate-600"
                       }`}
                     >
-                      GS25 {store.store_name}
-                    </span>
-
-                    <span
-                      className={`shrink-0 text-sm font-semibold ${
-                        hasStock
-                          ? "text-emerald-300"
-                          : isOutOfStock
+                      <span
+                        className={
+                          outOfStock
                             ? "text-slate-600"
-                            : "text-slate-500"
-                      }`}
-                    >
-                      {store.quantity === null ? "미조회" : `${store.quantity}개`}
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
-          </article>
-        ))}
-      </div>
+                            : selected
+                              ? "text-emerald-300"
+                              : "text-slate-300"
+                        }
+                      >
+                        {store.store_name}
+                      </span>
 
-      <aside className="xl:sticky xl:top-4 xl:self-start">
-        <div className="overflow-hidden rounded-2xl border border-slate-800 bg-slate-900">
-          <div className="border-b border-slate-800 px-5 py-4">
-            <h2 className="font-semibold text-slate-100">
-              {selectedStore ? `GS25 ${selectedStore.store_name}` : "매장 위치"}
-            </h2>
-          </div>
-
-          {selectedStore ? (
-            <iframe
-              key={selectedStore.id}
-              title={`GS25 ${selectedStore.store_name} 위치`}
-              src={mapUrl(selectedStore)}
-              className="h-[430px] w-full border-0 bg-slate-950"
-              loading="lazy"
-              referrerPolicy="no-referrer-when-downgrade"
-            />
-          ) : (
-            <div className="flex h-[430px] items-center justify-center text-sm text-slate-600">
-              표시할 매장이 없습니다.
-            </div>
-          )}
+                      <span
+                        className={`font-semibold ${
+                          hasStock
+                            ? "text-emerald-300"
+                            : outOfStock
+                              ? "text-slate-600"
+                              : "text-slate-500"
+                        }`}
+                      >
+                        {store.quantity === null ? "-" : store.quantity}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </article>
+          ))}
         </div>
-      </aside>
-    </section>
+
+        <aside className="xl:sticky xl:top-3 xl:self-start">
+          <div className="overflow-hidden rounded-xl border border-slate-800 bg-slate-900">
+            <div className="flex h-11 items-center border-b border-slate-800 px-4">
+              <h2 className="truncate text-sm font-semibold text-slate-100">
+                {selectedStore?.store_name ?? "매장 위치"}
+              </h2>
+            </div>
+
+            {!kakaoAppKey ? (
+              <div className="flex h-[340px] items-center justify-center px-6 text-center text-xs leading-5 text-slate-500">
+                NEXT_KAKAO_MAP_APP_KEY를 설정하면 카카오맵이 표시됩니다.
+              </div>
+            ) : (
+              <div
+                ref={mapContainerRef}
+                className="h-[340px] w-full bg-slate-950"
+                aria-label={`${selectedStore?.store_name ?? "선택 매장"} 지도`}
+              />
+            )}
+          </div>
+        </aside>
+      </section>
+    </>
   );
 }

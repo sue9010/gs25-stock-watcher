@@ -63,6 +63,7 @@ export default async function Home() {
     ...product,
     stores: stores.map((store) => {
       const status = statusByCombination.get(`${product.id}:${store.id}`) ?? null;
+
       return {
         ...store,
         quantity: status?.quantity ?? null,
@@ -75,12 +76,12 @@ export default async function Home() {
 
   return (
     <AppShell activeNav="Dashboard" userEmail={email}>
-      <section className="flex flex-col gap-4 rounded-2xl border border-slate-800 bg-slate-900/70 p-5 sm:flex-row sm:items-center sm:justify-between sm:p-6">
+      <section className="flex items-center justify-between gap-4 rounded-xl border border-slate-800 bg-slate-900/70 px-5 py-4">
         <div>
-          <p className="text-xs font-semibold uppercase tracking-[0.22em] text-emerald-400">
+          <p className="text-xs font-semibold uppercase tracking-[0.2em] text-emerald-400">
             Monitoring
           </p>
-          <h1 className="mt-2 text-2xl font-semibold tracking-tight text-white">
+          <h1 className="mt-1 text-xl font-semibold tracking-tight text-white">
             GS25 재고 모니터링
           </h1>
         </div>
@@ -88,7 +89,7 @@ export default async function Home() {
         <form action={checkNow}>
           <button
             type="submit"
-            className="h-10 w-full rounded-lg bg-emerald-400 px-5 text-sm font-semibold text-slate-950 transition hover:bg-emerald-300 sm:w-auto"
+            className="h-9 rounded-lg bg-emerald-400 px-4 text-sm font-semibold text-slate-950 transition hover:bg-emerald-300"
           >
             지금 조회
           </button>
