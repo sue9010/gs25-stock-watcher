@@ -1,0 +1,4 @@
+"use server";
+import { revalidatePath } from "next/cache";import { z } from "zod";import { requireUser } from "@/features/auth/require-user";
+const schema=z.object({monitoringEnabled:z.enum(["true","false"]),checkIntervalMinutes:z.coerce.number().int().min(1).max(1440)});
+export async function updateSettings(formData:FormData){const v=schema.parse({monitoringEnabled:formData.get("monitoringEnabled"),checkIntervalMinutes:formData.get("checkIntervalMinutes")});const {supabase,ownerId}=await requireUser();const {error}=await supabase.from("app_settings").update({monitoring_enabled:v.monitoringEnabled==="true",check_interval_minutes:v.checkIntervalMinutes,next_check_at:new Date().toISOString()}).eq("owner_id",ownerId);if(error)throw new Error("설정 저장 실패");revalidatePath("/settings");revalidatePath("/");}

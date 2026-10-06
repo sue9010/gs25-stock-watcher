@@ -1,0 +1,3 @@
+"use server";
+import { revalidatePath } from "next/cache";import { requireUser } from "@/features/auth/require-user";
+export async function checkNow(){const {supabase}=await requireUser();const {data}=await supabase.auth.getSession();if(!data.session)throw new Error("세션이 없습니다.");const response=await fetch(`${process.env.NEXT_PUBLIC_SUPABASE_URL}/functions/v1/check-stock`,{method:"POST",headers:{Authorization:`Bearer ${data.session.access_token}`,"content-type":"application/json"},body:"{}",cache:"no-store"});if(!response.ok)throw new Error("재고 조회 실행에 실패했습니다.");revalidatePath("/");revalidatePath("/history");}
