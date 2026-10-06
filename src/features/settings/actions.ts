@@ -14,7 +14,6 @@ const schema = z
     quietHoursEnabled: z.enum(["true", "false"]),
     quietHoursStart: timeSchema,
     quietHoursEnd: timeSchema,
-    checkIntervalMinutes: z.coerce.number().int().min(1).max(1440),
   })
   .refine((value) => value.quietHoursStart !== value.quietHoursEnd, {
     message: "방해금지 시작 시간과 종료 시간은 달라야 합니다.",
@@ -28,7 +27,6 @@ export async function updateSettings(formData: FormData) {
     quietHoursEnabled: formData.get("quietHoursEnabled"),
     quietHoursStart: formData.get("quietHoursStart"),
     quietHoursEnd: formData.get("quietHoursEnd"),
-    checkIntervalMinutes: formData.get("checkIntervalMinutes"),
   });
 
   const { supabase, ownerId } = await requireUser();
@@ -40,8 +38,9 @@ export async function updateSettings(formData: FormData) {
       quiet_hours_enabled: value.quietHoursEnabled === "true",
       quiet_hours_start: value.quietHoursStart,
       quiet_hours_end: value.quietHoursEnd,
-      check_interval_minutes: value.checkIntervalMinutes,
-      next_check_at: new Date().toISOString(),
+      check_interval_minutes: 30,
+      daily_api_request_budget: 2200,
+      max_requests_per_run: 40,
     })
     .eq("owner_id", ownerId);
 

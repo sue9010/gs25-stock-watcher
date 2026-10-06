@@ -42,6 +42,21 @@ type Store = {
   longitude: number;
 };
 
+const FIXED_CHECK_INTERVAL_MINUTES = 30;
+const MAX_REQUESTS_PER_RUN = 40;
+const DAILY_INVENTORY_REQUEST_BUDGET = 2200;
+
+function nextHalfHourIso(date = new Date()) {
+  const next = new Date(date);
+  next.setUTCSeconds(0, 0);
+  if (next.getUTCMinutes() < 30) {
+    next.setUTCMinutes(30);
+  } else {
+    next.setUTCHours(next.getUTCHours() + 1, 0, 0, 0);
+  }
+  return next.toISOString();
+}
+
 type QuietHoursSettings = {
   quiet_hours_enabled?: boolean | null;
   quiet_hours_start?: string | null;
@@ -155,6 +170,9 @@ async function runOwner(
     .single();
   if (settingsError) throw settingsError;
   if (!settings.monitoring_enabled && source === "cron") return { skipped: true };
+  if (settings.check_interval_minutes !== FIXED_CHECK_INTERVAL_MINUTES) {
+    throw new Error("조회 주기는 30분으로 고정되어 있습니다.");
+  }
 
   await db
     .from("check_runs")
@@ -203,8 +221,12 @@ async function runOwner(
     const storeClusters = clusterStores(activeStores);
     const requestCount = activeProducts.length * storeClusters.length;
 
-    if (requestCount > settings.max_requests_per_run) {
-      throw new Error(`요청 수 ${requestCount}회가 실행 한도보다 큽니다.`);
+    const requestLimit = Math.min(settings.max_requests_per_run, MAX_REQUESTS_PER_RUN);
+    if (requestCount > requestLimit) {
+      throw new Error(
+        `요청 수 ${requestCount}회가 실행 한도 ${requestLimit}회를 초과합니다. ` +
+          `활성 매장은 최대 10개, 상품 4개 기준 최대 40회입니다.`,
+      );
     }
 
     const { data: recentRuns, error: recentRunsError } = await db
@@ -219,8 +241,15 @@ async function runOwner(
       (sum, recentRun) => sum + recentRun.requests_made,
       0,
     );
-    if (recentRequests + requestCount > settings.daily_api_request_budget) {
-      throw new Error("24시간 API 요청 예산을 초과합니다.");
+    const dailyBudget = Math.min(
+      settings.daily_api_request_budget,
+      DAILY_INVENTORY_REQUEST_BUDGET,
+    );
+    if (recentRequests + requestCount > dailyBudget) {
+      throw new Error(
+        `24시간 재고조회 API 예산 ${dailyBudget}회를 초과합니다. ` +
+          `공개 daiso-mcp의 전체 GET 한도 3,000회/일에 검색 요청 여유를 남기기 위한 제한입니다.`,
+      );
     }
 
     const { data: statuses, error: statusesError } = await db
@@ -370,9 +399,7 @@ async function runOwner(
     await db
       .from("app_settings")
       .update({
-        next_check_at: new Date(
-          Date.now() + settings.check_interval_minutes * 60_000,
-        ).toISOString(),
+        next_check_at: nextHalfHourIso(),
       })
       .eq("owner_id", ownerId);
 
@@ -435,8 +462,7 @@ Deno.serve(async (request) => {
       const { data, error } = await db
         .from("app_settings")
         .select("owner_id")
-        .eq("monitoring_enabled", true)
-        .lte("next_check_at", new Date().toISOString());
+        .eq("monitoring_enabled", true);
       if (error) throw error;
       ownerIds = (data ?? []).map((setting) => setting.owner_id);
     } else {

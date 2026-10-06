@@ -15,9 +15,11 @@ begin
 end;
 $$;
 
+-- Fixed schedule: every hour at :00 and :30.
+-- pg_cron uses UTC, but minute 00/30 is identical in Asia/Seoul.
 select cron.schedule(
   'gs25-stock-check',
-  '* * * * *',
+  '0,30 * * * *',
   $job$
     select net.http_post(
       url := 'https://zbopnlzsqlmxlrknyugu.supabase.co/functions/v1/check-stock',
