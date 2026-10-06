@@ -1,13 +1,10 @@
 import { AppShell } from "@/components/app-shell";
+import { MonitoringDashboard } from "@/features/dashboard/monitoring-dashboard";
 import { checkNow } from "@/features/inventory/actions";
 import { createClient } from "@/lib/supabase/server";
 import { redirect } from "next/navigation";
 
-const kstFormatter = new Intl.DateTimeFormat("ko-KR", {
-  dateStyle: "medium",
-  timeStyle: "short",
-  timeZone: "Asia/Seoul",
-});
+export const dynamic = "force-dynamic";
 
 type Product = {
   id: number;
@@ -20,6 +17,8 @@ type Store = {
   store_code: string;
   store_name: string;
   address: string;
+  latitude: number;
+  longitude: number;
 };
 
 type StockStatus = {
@@ -28,12 +27,6 @@ type StockStatus = {
   quantity: number;
   checked_at: string;
 };
-
-function formatKst(value: string | null | undefined) {
-  return value ? kstFormatter.format(new Date(value)) : "아직 조회되지 않음";
-}
-
-export const dynamic = "force-dynamic";
 
 export default async function Home() {
   const supabase = await createClient();
@@ -52,7 +45,7 @@ export default async function Home() {
       .order("item_name"),
     supabase
       .from("stores")
-      .select("id,store_code,store_name,address")
+      .select("id,store_code,store_name,address,latitude,longitude")
       .eq("enabled", true)
       .is("archived_at", null)
       .order("store_name"),
@@ -70,13 +63,17 @@ export default async function Home() {
     statuses.map((status) => [`${status.product_id}:${status.store_id}`, status]),
   );
 
-  const monitoringRows = products.flatMap((product) =>
-    stores.map((store) => ({
-      product,
-      store,
-      status: statusByCombination.get(`${product.id}:${store.id}`) ?? null,
-    })),
-  );
+  const monitoringProducts = products.map((product) => ({
+    ...product,
+    stores: stores.map((store) => {
+      const status = statusByCombination.get(`${product.id}:${store.id}`) ?? null;
+      return {
+        ...store,
+        quantity: status?.quantity ?? null,
+        checkedAt: status?.checked_at ?? null,
+      };
+    }),
+  }));
 
   const email =
     typeof claimsData.claims.email === "string" ? claimsData.claims.email : "사용자";
@@ -92,7 +89,7 @@ export default async function Home() {
             GS25 재고 모니터링
           </h1>
           <p className="mt-2 text-sm text-slate-400">
-            활성 상품과 활성 매장의 모든 조합을 자동으로 조회합니다.
+            상품별로 모니터링 매장과 마지막 확인 재고를 표시합니다.
           </p>
         </div>
 
@@ -106,81 +103,16 @@ export default async function Home() {
         </form>
       </section>
 
-      <section className="overflow-hidden rounded-2xl border border-slate-800 bg-slate-900">
-        <div className="flex flex-col gap-1 border-b border-slate-800 px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
-          <div>
-            <h2 className="font-semibold text-slate-100">모니터링 중인 재고</h2>
-            <p className="mt-1 text-xs text-slate-500">
-              상품 {products.length}개 × 매장 {stores.length}개 · 총 {monitoringRows.length}개 조합
-            </p>
-          </div>
-        </div>
-
-        {queryError ? (
-          <p
-            role="alert"
-            className="m-5 rounded-lg border border-red-500/20 bg-red-500/10 p-3 text-sm text-red-300"
-          >
-            데이터를 불러오지 못했습니다: {queryError.message}
-          </p>
-        ) : null}
-
-        {!queryError && monitoringRows.length === 0 ? (
-          <div className="px-5 py-12 text-center">
-            <p className="text-sm font-medium text-slate-300">모니터링 중인 조합이 없습니다.</p>
-            <p className="mt-1 text-xs text-slate-500">
-              Products와 Stores에 각각 활성 항목을 추가하면 자동으로 표시됩니다.
-            </p>
-          </div>
-        ) : null}
-
-        {!queryError && monitoringRows.length > 0 ? (
-          <div className="overflow-x-auto">
-            <table className="min-w-full divide-y divide-slate-800 text-left text-sm">
-              <thead className="bg-slate-950/50 text-xs uppercase tracking-wide text-slate-500">
-                <tr>
-                  <th className="px-5 py-3 font-medium">상품</th>
-                  <th className="px-5 py-3 font-medium">매장</th>
-                  <th className="px-5 py-3 font-medium">마지막 재고</th>
-                  <th className="px-5 py-3 font-medium">마지막 조회</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-800">
-                {monitoringRows.map(({ product, store, status }) => (
-                  <tr key={`${product.id}:${store.id}`} className="align-top">
-                    <td className="px-5 py-4">
-                      <p className="font-medium text-slate-100">{product.item_name}</p>
-                      <p className="mt-1 text-xs text-slate-500">{product.item_code}</p>
-                    </td>
-                    <td className="px-5 py-4">
-                      <p className="font-medium text-slate-200">GS25 {store.store_name}</p>
-                      <p className="mt-1 max-w-md text-xs text-slate-500">{store.address}</p>
-                    </td>
-                    <td className="px-5 py-4">
-                      {status ? (
-                        <span
-                          className={`inline-flex min-w-16 justify-center rounded-full border px-3 py-1 text-xs font-semibold ${
-                            status.quantity > 0
-                              ? "border-emerald-500/20 bg-emerald-500/10 text-emerald-300"
-                              : "border-slate-700 bg-slate-800 text-slate-400"
-                          }`}
-                        >
-                          {status.quantity}개
-                        </span>
-                      ) : (
-                        <span className="text-sm text-slate-600">미조회</span>
-                      )}
-                    </td>
-                    <td className="whitespace-nowrap px-5 py-4 text-sm text-slate-400">
-                      {formatKst(status?.checked_at)}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        ) : null}
-      </section>
+      {queryError ? (
+        <p
+          role="alert"
+          className="rounded-lg border border-red-500/20 bg-red-500/10 p-3 text-sm text-red-300"
+        >
+          데이터를 불러오지 못했습니다: {queryError.message}
+        </p>
+      ) : (
+        <MonitoringDashboard products={monitoringProducts} />
+      )}
     </AppShell>
   );
 }
